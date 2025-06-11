@@ -6,6 +6,8 @@ After collect the data, you will be asked if you want to securely send the file 
 
 # How to execute:
 
+Open the Powershell terminal with Administrator rights. Then you need to execute:
+
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 Unblock-File -Path .\Collect-Windows-DCV-Logs.ps1
