@@ -9,8 +9,5 @@ After collect the data, you will be asked if you want to securely send the file 
 Open the Powershell terminal with Administrator rights. Then you need to execute:
 
 ```powershell
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-Unblock-File -Path .\Collect-Windows-DCV-Logs.ps1
-
-.\Collect-Windows-DCV-Logs.ps1
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/NISP-GmbH/Collect-Windows-DCV-Logs/main/Collect-Windows-DCV-Logs.ps1" -OutFile "$env:TEMP\Collect-Windows-DCV-Logs.ps1"; Unblock-File -Path "$env:TEMP\Collect-Windows-DCV-Logs.ps1"; & "$env:TEMP\Collect-Windows-DCV-Logs.ps1"
 ```
