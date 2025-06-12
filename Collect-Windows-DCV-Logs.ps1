@@ -839,6 +839,80 @@ function New-LogBundle {
             Write-Warning "Unable to copy DCV log folder: $_"
         }
 
+        # NEW: Collect ProgramData\NICE directory
+        try {
+            Write-Host "Collecting ProgramData NICE directory..."
+            $programDataNicePath = "C:\ProgramData\NICE"
+            if (Test-Path $programDataNicePath) {
+                $programDataNiceDestPath = Join-Path $script:BundlePath "ProgramData_NICE"
+                Copy-Item -Path $programDataNicePath -Destination $programDataNiceDestPath -Recurse -ErrorAction SilentlyContinue
+                Write-Host "ProgramData NICE directory collected successfully"
+            }
+            else {
+                Write-Host "ProgramData NICE directory not found: $programDataNicePath"
+            }
+        }
+        catch {
+            Write-Warning "Failed to copy ProgramData NICE directory: $_"
+        }
+
+        # NEW: Collect C:\ProgramData\client.log file
+        try {
+            Write-Host "Collecting ProgramData client.log file..."
+            $clientLogPath = "C:\ProgramData\client.log"
+            if (Test-Path $clientLogPath) {
+                $clientLogDestPath = Join-Path $script:BundlePath "client.log"
+                Copy-Item -Path $clientLogPath -Destination $clientLogDestPath -ErrorAction SilentlyContinue
+                Write-Host "ProgramData client.log file collected successfully"
+            }
+            else {
+                Write-Host "ProgramData client.log file not found: $clientLogPath"
+            }
+        }
+        catch {
+            Write-Warning "Failed to copy ProgramData client.log file: $_"
+        }
+
+        # NEW: Export registry entries from HKEY_USERS/S-1-5-18/Software/GSettings/com/nicesoftware
+        try {
+            Write-Host "Collecting NICE GSettings registry entries..."
+            $regPath = "HKU\S-1-5-18\Software\GSettings\com\nicesoftware"
+            $regExportPath = Join-Path $script:BundlePath "NICE_GSettings_Registry.reg"
+            
+            # First check if the registry path exists
+            $regKeyExists = $false
+            try {
+                $regTestResult = reg query "HKU\S-1-5-18\Software\GSettings\com\nicesoftware" 2>$null
+                if ($LASTEXITCODE -eq 0) {
+                    $regKeyExists = $true
+                }
+            }
+            catch {
+                # Ignore errors from reg query
+            }
+            
+            if ($regKeyExists) {
+                try {
+                    $regExportResult = reg export $regPath $regExportPath /y 2>$null
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "NICE GSettings registry entries exported successfully"
+                    }
+                    else {
+                        Write-Host "Registry export command completed but may have encountered issues"
+                    }
+                }
+                catch {
+                    Write-Warning "Failed to export NICE GSettings registry entries: $_"
+                }
+            }
+            else {
+                Write-Host "NICE GSettings registry path not found: $regPath"
+            }
+        }
+        catch {
+            Write-Warning "Failed to collect NICE GSettings registry entries: $_"
+        }
+
         try {
             Write-Host "Collecting system information..."
             $systemInfoPath = Join-Path $script:BundlePath "SystemInfo.txt"
