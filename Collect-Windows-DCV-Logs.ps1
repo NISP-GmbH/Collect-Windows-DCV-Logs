@@ -71,6 +71,18 @@ function Show-WelcomeMessage {
     Write-ColoredOutput "Notes:" "Green"
     Write-ColoredOutput "- The script will not restart any service." "Green"
     Write-Host "#################################################"
+    # Added Disclaimer
+    Write-ColoredOutput "Disclaimer:" "Yellow"
+    Write-ColoredOutput "- This script collects system and application data for troubleshooting, including:" "Yellow"
+    Write-ColoredOutput "  - System Information (systeminfo, network config, Windows version)" "Yellow"
+    Write-ColoredOutput "  - Installed applications list" "Yellow"
+    Write-ColoredOutput "  - Group Policy (GPO) results" "Yellow"
+    Write-ColoredOutput "  - EC2 instance metadata (if applicable)" "Yellow"
+    Write-ColoredOutput "  - NICE DCV logs and configuration" "Yellow"
+    Write-ColoredOutput "  - Windows Event Logs (last 7 days)" "Yellow"
+    Write-ColoredOutput "  - Windows Crash Dumps (last 7 days)" "Yellow"
+    Write-ColoredOutput "- The collected data will be compressed, encrypted, and uploaded for analysis." "Yellow"
+    Write-Host "#################################################"
 
     Write-ColoredOutput "This script will collect relevant logs to send to NISP Support Team." "Green"
     Write-Host "In the end an encrypted file will be created, then it will be securely uploaded to NISP and a notification will be sent to NISP Support Team."
@@ -547,7 +559,7 @@ function Get-InstalledApplications() {
         }
     }
 
-    return $installedApps | Select-Object Name, DisplayName, DisplayVersion, InstallDate, InstallLocation, HelpLink, Publisher, UninstallString, URLInfoAbout, Is64Bit, Hive, Path, Username, ComputerName 
+    return $installedApps | Select-Object Name, DisplayName, DisplayVersion, InstallDate, InstallLocation, HelpLink, Publisher, UninstallString, URLInfoAbout, Is6BIt, Hive, Path, Username, ComputerName 
 }
 
 function Get-DCVInformation {
