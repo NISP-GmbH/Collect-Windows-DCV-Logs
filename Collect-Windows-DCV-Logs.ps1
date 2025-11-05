@@ -47,6 +47,7 @@ $script:IdentifierString = ""
 $script:EncryptPassword = ""
 $script:BundlePath = ""
 $script:HostnameBundlePath = ""
+$script:CollectGpoResults = $false # Default to not collecting GPO
 
 function Write-ColoredOutput {
     param(
@@ -71,12 +72,11 @@ function Show-WelcomeMessage {
     Write-ColoredOutput "Notes:" "Green"
     Write-ColoredOutput "- The script will not restart any service." "Green"
     Write-Host "#################################################"
-    # Added Disclaimer
     Write-ColoredOutput "Disclaimer:" "Yellow"
     Write-ColoredOutput "- This script collects system and application data for troubleshooting, including:" "Yellow"
     Write-ColoredOutput "  - System Information (systeminfo, network config, Windows version)" "Yellow"
     Write-ColoredOutput "  - Installed applications list" "Yellow"
-    Write-ColoredOutput "  - Group Policy (GPO) results" "Yellow"
+    Write-ColoredOutput "  - Group Policy (GPO) results (if you consent)" "Yellow"
     Write-ColoredOutput "  - EC2 instance metadata (if applicable)" "Yellow"
     Write-ColoredOutput "  - NICE DCV logs and configuration" "Yellow"
     Write-ColoredOutput "  - Windows Event Logs (last 7 days)" "Yellow"
@@ -102,6 +102,24 @@ function Show-WelcomeMessage {
     Write-Host ""
     Write-Host "Write any text that will identify you for NISP Support Team. Can be e-mail, name, e-mail subject, company name etc."
     $script:IdentifierString = Read-Host
+
+    Write-Host ""
+    Write-ColoredOutput "Collect Group Policy (GPO) Information?" "Yellow"
+    Write-Host "Group Policy results contain detailed security and configuration rules for your computer and domain (e.g., password policies, software restrictions, network settings)."
+    Write-Host "This information is very useful for troubleshooting but can be sensitive."
+    Write-ColoredOutput "Do you want to include GPO results in the log bundle? (Y/N):" "Green"
+    
+    do {
+        $gpoConfirmation = Read-Host
+    } while ($gpoConfirmation -notin @("Y", "y", "Yes", "yes", "N", "n", "No", "no"))
+    
+    if ($gpoConfirmation -match "^(Y|y|Yes|yes)$") {
+        $script:CollectGpoResults = $true
+        Write-Host "GPO results will be collected."
+    } else {
+        $script:CollectGpoResults = $false
+        Write-Host "Skipping GPO results collection."
+    }
 }
 
 function Generate-RandomPassword {
@@ -559,7 +577,7 @@ function Get-InstalledApplications() {
         }
     }
 
-    return $installedApps | Select-Object Name, DisplayName, DisplayVersion, InstallDate, InstallLocation, HelpLink, Publisher, UninstallString, URLInfoAbout, Is6BIt, Hive, Path, Username, ComputerName 
+    return $installedApps | Select-Object Name, DisplayName, DisplayVersion, InstallDate, InstallLocation, HelpLink, Publisher, UninstallString, URLInfoAbout, Is64Bit, Hive, Path, Username, ComputerName 
 }
 
 function Get-DCVInformation {
@@ -762,45 +780,51 @@ function New-LogBundle {
             Write-Warning "Failed to collect installed applications: $_"
         }
 
-        Write-Host "Collecting Group Policy results..."
-        try {
-            $gpResultPath = Join-Path $script:BundlePath 'GPResult.html'
-            
-            $gpresultSuccess = $false
-            
+        # Conditionally collect GPO results based on user consent
+        if ($script:CollectGpoResults) {
+            Write-Host "Collecting Group Policy results..."
             try {
-                Start-Process -FilePath "gpresult" -ArgumentList "/H", "`"$gpResultPath`"" -Wait -NoNewWindow -ErrorAction Stop
-                $gpresultSuccess = $true
-                Write-Host "Group Policy results collected successfully (HTML format)"
-            }
-            catch {
-                Write-Verbose "Failed with /H parameter: $_"
-            }
-            
-            if (-not $gpresultSuccess) {
+                $gpResultPath = Join-Path $script:BundlePath 'GPResult.html'
+                
+                $gpresultSuccess = $false
+                
                 try {
-                    Start-Process -FilePath "gpresult" -ArgumentList "/h", "`"$gpResultPath`"" -Wait -NoNewWindow -ErrorAction Stop
+                    Start-Process -FilePath "gpresult" -ArgumentList "/H", "`"$gpResultPath`"" -Wait -NoNewWindow -ErrorAction Stop
                     $gpresultSuccess = $true
                     Write-Host "Group Policy results collected successfully (HTML format)"
                 }
                 catch {
-                    Write-Verbose "Failed with /h parameter: $_"
+                    Write-Verbose "Failed with /H parameter: $_"
+                }
+                
+                if (-not $gpresultSuccess) {
+                    try {
+                        Start-Process -FilePath "gpresult" -ArgumentList "/h", "`"$gpResultPath`"" -Wait -NoNewWindow -ErrorAction Stop
+                        $gpresultSuccess = $true
+                        Write-Host "Group Policy results collected successfully (HTML format)"
+                    }
+                    catch {
+                        Write-Verbose "Failed with /h parameter: $_"
+                    }
+                }
+                
+                if (-not $gpresultSuccess) {
+                    try {
+                        $gpResultTextPath = Join-Path $script:BundlePath 'GPResult.txt'
+                        Start-Process -FilePath "gpresult" -ArgumentList "/R" -Wait -NoNewWindow -RedirectStandardOutput $gpResultTextPath -ErrorAction Stop
+                        Write-Host "Group Policy results collected successfully (text format)"
+                    }
+                    catch {
+                        Write-Warning "Failed to collect Group Policy results with all methods: $_"
+                    }
                 }
             }
-            
-            if (-not $gpresultSuccess) {
-                try {
-                    $gpResultTextPath = Join-Path $script:BundlePath 'GPResult.txt'
-                    Start-Process -FilePath "gpresult" -ArgumentList "/R" -Wait -NoNewWindow -RedirectStandardOutput $gpResultTextPath -ErrorAction Stop
-                    Write-Host "Group Policy results collected successfully (text format)"
-                }
-                catch {
-                    Write-Warning "Failed to collect Group Policy results with all methods: $_"
-                }
+            catch {
+                Write-Warning "Failed to collect Group Policy results: $_"
             }
         }
-        catch {
-            Write-Warning "Failed to collect Group Policy results: $_"
+        else {
+            Write-Host "Skipping Group Policy results collection as requested by user."
         }
 
         Write-Host "Collecting DCV information..."
