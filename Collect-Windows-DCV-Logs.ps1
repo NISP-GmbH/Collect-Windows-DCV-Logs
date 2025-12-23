@@ -101,7 +101,14 @@ function Show-WelcomeMessage {
     
     Write-Host ""
     Write-Host "Write any text that will identify you for NISP Support Team. Can be e-mail, name, e-mail subject, company name etc."
-    $script:IdentifierString = Read-Host
+    Write-ColoredOutput "(This field is required)" "Yellow"
+    
+    do {
+        $script:IdentifierString = Read-Host
+        if ([string]::IsNullOrWhiteSpace($script:IdentifierString)) {
+            Write-ColoredOutput "Identifier is required. Please enter a valid identifier." "Red"
+        }
+    } while ([string]::IsNullOrWhiteSpace($script:IdentifierString))
 
     Write-Host ""
     Write-ColoredOutput "Collect Group Policy (GPO) Information?" "Yellow"
@@ -224,6 +231,16 @@ function Invoke-LogUpload {
                 $httpClient.Timeout = [TimeSpan]::FromMinutes(10)
                 
                 $multipartContent = New-Object System.Net.Http.MultipartFormDataContent
+                
+                # Add service parameter (dcv for DCV logs)
+                $serviceContent = New-Object System.Net.Http.StringContent -ArgumentList @("dcv")
+                $multipartContent.Add($serviceContent, "service")
+                
+                # Add identifier parameter
+                $identifierContent = New-Object System.Net.Http.StringContent -ArgumentList @($script:IdentifierString)
+                $multipartContent.Add($identifierContent, "identifier")
+                
+                # Add file content
                 $fileContent = New-Object System.Net.Http.ByteArrayContent -ArgumentList @(,$fileBytes)
                 $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse("application/octet-stream")
                 $multipartContent.Add($fileContent, "file", $fileName)
@@ -273,6 +290,20 @@ function Invoke-LogUpload {
                     
                     $LF = "`r`n"
                     $bodyLines = @()
+                    
+                    # Add service parameter
+                    $bodyLines += "--$boundary"
+                    $bodyLines += "Content-Disposition: form-data; name=`"service`""
+                    $bodyLines += ""
+                    $bodyLines += "dcv"
+                    
+                    # Add identifier parameter
+                    $bodyLines += "--$boundary"
+                    $bodyLines += "Content-Disposition: form-data; name=`"identifier`""
+                    $bodyLines += ""
+                    $bodyLines += $script:IdentifierString
+                    
+                    # Add file content
                     $bodyLines += "--$boundary"
                     $bodyLines += "Content-Disposition: form-data; name=`"file`"; filename=`"$fileName`""
                     $bodyLines += "Content-Type: application/octet-stream"
@@ -324,6 +355,8 @@ function Invoke-LogUpload {
                             
                             $curlArgs = @(
                                 "-X", "POST"
+                                "-F", "service=dcv"
+                                "-F", "identifier=$($script:IdentifierString)"
                                 "-F", "file=@`"$FilePath`""
                                 "--connect-timeout", "30"
                                 "--max-time", "600"
