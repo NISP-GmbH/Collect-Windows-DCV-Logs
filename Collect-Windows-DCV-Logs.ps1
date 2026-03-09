@@ -152,8 +152,11 @@ function New-PasswordProtectedZip {
         }
         else {
             Write-ColoredOutput "Creating ZIP file (7-Zip not found for password protection)..." "Yellow"
-            Compress-Archive -Path "$SourcePath\*" -DestinationPath $DestinationPath -Force
-            
+
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            if (Test-Path $DestinationPath) { Remove-Item $DestinationPath -Force }
+            [System.IO.Compression.ZipFile]::CreateFromDirectory($SourcePath, $DestinationPath)
+
             $passwordFile = [System.IO.Path]::ChangeExtension($DestinationPath, ".password.txt")
             "Password: $Password" | Set-Content -Path $passwordFile
             Write-ColoredOutput "Password saved to: $passwordFile" "Yellow"
@@ -1018,7 +1021,34 @@ function Main {
         
         $zipPath = Join-Path -Path $PSScriptRoot -ChildPath $script:CompressedFileName
         if (Test-Path $zipPath) {
-            Invoke-LogUpload -FilePath $zipPath
+            $zipSizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
+            if ($zipSizeMB -gt 500) {
+                Write-ColoredOutput "The compressed file is $zipSizeMB MB." "Yellow"
+                Write-ColoredOutput "Would you like to remove Crash Dumps and Event Logs to reduce the file size? (Y/N):" "Yellow"
+                $reduceConfirm = Read-Host
+                if ($reduceConfirm -match "^(Y|y|Yes|yes)$") {
+                    Write-ColoredOutput "Removing Crash Dumps and Event Logs from the bundle..." "Yellow"
+                    $eventLogsPath = Join-Path -Path $script:HostnameBundlePath -ChildPath "EventLogs"
+                    $crashDumpsPath = Join-Path -Path $script:HostnameBundlePath -ChildPath "CrashDumps"
+                    if (Test-Path $eventLogsPath) { Remove-Item -Path $eventLogsPath -Recurse -Force }
+                    if (Test-Path $crashDumpsPath) { Remove-Item -Path $crashDumpsPath -Recurse -Force }
+
+                    Remove-Item -Path $zipPath -Force
+                    $passwordFile = [System.IO.Path]::ChangeExtension($zipPath, ".password.txt")
+                    if (Test-Path $passwordFile) { Remove-Item -Path $passwordFile -Force }
+
+                    Write-ColoredOutput "Re-compressing log collection..." "Green"
+                    Invoke-LogCompression
+
+                    if (Test-Path $zipPath) {
+                        $newSizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
+                        Write-ColoredOutput "New file size: $newSizeMB MB" "Green"
+                    }
+                }
+            }
+            if (Test-Path $zipPath) {
+                Invoke-LogUpload -FilePath $zipPath
+            }
         }
         
         Remove-TempFiles
