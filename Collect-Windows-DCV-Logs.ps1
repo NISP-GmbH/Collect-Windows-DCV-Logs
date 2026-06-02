@@ -24,10 +24,10 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
     Author: AWS
 #>
 
-[CmdletBinding()]
-param(
-    [switch]$Force
-)
+# NOTE: This script intentionally does NOT use [CmdletBinding()]/a typed param()
+# block so that GNU double-dash style flags (e.g. --without-upload) land in the
+# automatic $args variable and can be parsed manually below. See the parameter
+# parsing section near the bottom of the file (just before Main is invoked).
 
 # Add required assemblies
 Add-Type -AssemblyName System.Web
@@ -49,6 +49,14 @@ $script:BundlePath = ""
 $script:HostnameBundlePath = ""
 $script:CollectGpoResults = $false # Default to not collecting GPO
 
+# Command-line option flags (populated by the parameter parsing section below)
+$script:SkipUpload      = $false   # --without-upload
+$script:SkipEncryption  = $false   # --without-encryption
+$script:SkipCompression = $false   # --without-compression
+$script:NonInteractive  = $false   # --collect-logs (run with no interactive menu)
+$script:ProxyUrl        = ""        # --proxy
+$script:Message         = ""        # --message (identifier for NI SP Support Team)
+
 function Write-ColoredOutput {
     param(
         [string]$Message,
@@ -64,7 +72,72 @@ function Write-ColoredOutput {
     }
 }
 
+function Show-Help {
+    Write-Host ""
+    Write-ColoredOutput "NI SP DCV Log Collection Tool - Help" "Green"
+    Write-Host "#################################################"
+    Write-Host "Collects Amazon/NICE DCV logs and system information into a bundle for troubleshooting."
+    Write-Host ""
+    Write-ColoredOutput "USAGE:" "Yellow"
+    Write-Host "  .\Collect-Windows-DCV-Logs.ps1 [options]"
+    Write-Host ""
+    Write-ColoredOutput "OPTIONS:" "Yellow"
+    Write-Host "  --without-upload        Skip upload; keep the file locally for manual upload."
+    Write-Host "  --without-encryption    Create the compressed file without encryption"
+    Write-Host "                          (on Windows this means a plain ZIP without a password)."
+    Write-Host "  --collect-logs          Only collect logs (no interactive menu / prompts)."
+    Write-Host "  --proxy <url>           Use a proxy for uploading"
+    Write-Host "                          (e.g. http://proxy:8080, socks5://proxy:1080)."
+    Write-Host "  --message <text>        Identifier text for the NI SP Support Team"
+    Write-Host "                          (e.g. e-mail, name, company); skips the interactive prompt."
+    Write-Host "  --without-compression   Skip compression (keeps logs as a directory)."
+    Write-Host "                          Also implicitly sets --without-encryption and --without-upload."
+    Write-Host "  --help, -h              Show this help message and exit."
+    Write-Host ""
+    Write-ColoredOutput "EXAMPLES:" "Yellow"
+    Write-Host "  # Interactive run (default behaviour)"
+    Write-Host "  .\Collect-Windows-DCV-Logs.ps1"
+    Write-Host ""
+    Write-Host "  # Fully unattended collection + upload with a known identifier"
+    Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --message ""jane@acme.com"""
+    Write-Host ""
+    Write-Host "  # Collect and keep the file locally, no upload"
+    Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --without-upload"
+    Write-Host ""
+    Write-Host "  # Collect raw logs as a plain directory (no zip, no encryption, no upload)"
+    Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --without-compression"
+    Write-Host ""
+    Write-Host "  # Upload through a proxy"
+    Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --message ""me"" --proxy ""http://proxy:8080"""
+    Write-Host "#################################################"
+}
+
+# Returns a hashtable to splat onto Invoke-WebRequest / Invoke-RestMethod so the
+# configured proxy (if any) is applied. Empty when no --proxy was supplied.
+function Get-ProxySplat {
+    $splat = @{}
+    if (-not [string]::IsNullOrWhiteSpace($script:ProxyUrl)) {
+        $splat['Proxy'] = $script:ProxyUrl
+    }
+    return $splat
+}
+
 function Show-WelcomeMessage {
+    # Non-interactive mode (--collect-logs): no prompts at all.
+    if ($script:NonInteractive) {
+        Write-ColoredOutput "NI SP DCV Log Collection Tool (non-interactive mode)" "Green"
+        if ([string]::IsNullOrWhiteSpace($script:IdentifierString)) {
+            $script:IdentifierString = "$($script:Hostname)_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+            Write-Host "No --message provided. Using default identifier: $script:IdentifierString"
+        }
+        else {
+            Write-Host "Using identifier: $script:IdentifierString"
+        }
+        # GPO results may be sensitive; do not collect them unattended.
+        $script:CollectGpoResults = $false
+        return
+    }
+
     Write-Host "#################################################"
     Write-ColoredOutput "Welcome to NI SP DCV Log Collection Tool!" "Green"
     Write-ColoredOutput "Check all of our guides and tools: https://github.com/NISP-GmbH/Guides" "Green"
@@ -100,15 +173,21 @@ function Show-WelcomeMessage {
     }
     
     Write-Host ""
-    Write-Host "Write any text that will identify you for NISP Support Team. Can be e-mail, name, e-mail subject, company name etc."
-    Write-ColoredOutput "(This field is required)" "Yellow"
-    
-    do {
-        $script:IdentifierString = Read-Host
-        if ([string]::IsNullOrWhiteSpace($script:IdentifierString)) {
-            Write-ColoredOutput "Identifier is required. Please enter a valid identifier." "Red"
-        }
-    } while ([string]::IsNullOrWhiteSpace($script:IdentifierString))
+    if (-not [string]::IsNullOrWhiteSpace($script:IdentifierString)) {
+        # Identifier supplied via --message; skip the interactive prompt.
+        Write-Host "Using identifier from --message: $script:IdentifierString"
+    }
+    else {
+        Write-Host "Write any text that will identify you for NISP Support Team. Can be e-mail, name, e-mail subject, company name etc."
+        Write-ColoredOutput "(This field is required)" "Yellow"
+
+        do {
+            $script:IdentifierString = Read-Host
+            if ([string]::IsNullOrWhiteSpace($script:IdentifierString)) {
+                Write-ColoredOutput "Identifier is required. Please enter a valid identifier." "Red"
+            }
+        } while ([string]::IsNullOrWhiteSpace($script:IdentifierString))
+    }
 
     Write-Host ""
     Write-ColoredOutput "Collect Group Policy (GPO) Information?" "Yellow"
@@ -188,18 +267,28 @@ function Invoke-LogUpload {
     
     if ($fileSizeMB -gt 100) {
         Write-ColoredOutput "Warning: File is larger than 100MB. Upload may take longer or fail." "Yellow"
-        Write-ColoredOutput "Do you want to continue with upload? (Y/N):" "Yellow"
-        $uploadConfirm = Read-Host
-        if ($uploadConfirm -notmatch "^(Y|y|Yes|yes)$") {
-            Write-ColoredOutput "Upload cancelled. File saved locally." "Yellow"
-            return
+        if ($script:NonInteractive) {
+            Write-ColoredOutput "Non-interactive mode: continuing with upload." "Yellow"
+        }
+        else {
+            Write-ColoredOutput "Do you want to continue with upload? (Y/N):" "Yellow"
+            $uploadConfirm = Read-Host
+            if ($uploadConfirm -notmatch "^(Y|y|Yes|yes)$") {
+                Write-ColoredOutput "Upload cancelled. File saved locally." "Yellow"
+                return
+            }
         }
     }
-    
+
+    $proxySplat = Get-ProxySplat
+    if ($proxySplat.Count -gt 0) {
+        Write-Host "Using proxy for upload: $script:ProxyUrl"
+    }
+
     # Test basic connectivity first
     try {
         Write-Host "Testing connectivity to $script:UploadDomain..."
-        $testResponse = Invoke-WebRequest -Uri $script:UploadDomain -Method HEAD -TimeoutSec 10 -UseBasicParsing
+        $testResponse = Invoke-WebRequest -Uri $script:UploadDomain -Method HEAD -TimeoutSec 10 -UseBasicParsing @proxySplat
         Write-ColoredOutput "Connectivity test successful" "Green"
     }
     catch {
@@ -229,8 +318,16 @@ function Invoke-LogUpload {
             # Method 1: Try with Add-Type and HttpClient (more reliable for large files)
             try {
                 Add-Type -AssemblyName System.Net.Http
-                
-                $httpClient = New-Object System.Net.Http.HttpClient
+
+                if (-not [string]::IsNullOrWhiteSpace($script:ProxyUrl)) {
+                    $httpHandler = New-Object System.Net.Http.HttpClientHandler
+                    $httpHandler.Proxy = New-Object System.Net.WebProxy($script:ProxyUrl, $true)
+                    $httpHandler.UseProxy = $true
+                    $httpClient = New-Object System.Net.Http.HttpClient($httpHandler)
+                }
+                else {
+                    $httpClient = New-Object System.Net.Http.HttpClient
+                }
                 $httpClient.Timeout = [TimeSpan]::FromMinutes(10)
                 
                 $multipartContent = New-Object System.Net.Http.MultipartFormDataContent
@@ -266,7 +363,7 @@ function Invoke-LogUpload {
                             identifier_string = $script:IdentifierString
                         }
                         
-                        $notifyResponse = Invoke-RestMethod -Uri $script:NotifyUrl -Method Post -Body $notifyData -ContentType "application/x-www-form-urlencoded" -TimeoutSec 30
+                        $notifyResponse = Invoke-RestMethod -Uri $script:NotifyUrl -Method Post -Body $notifyData -ContentType "application/x-www-form-urlencoded" -TimeoutSec 30 @proxySplat
                         Write-ColoredOutput "NISP Support Team was notified about the file!" "Green"
                     }
                     catch {
@@ -286,6 +383,9 @@ function Invoke-LogUpload {
                 try {
                     $webClient = New-Object System.Net.WebClient
                     $webClient.Headers.Add("User-Agent", "PowerShell-DCVLogCollector/1.0")
+                    if (-not [string]::IsNullOrWhiteSpace($script:ProxyUrl)) {
+                        $webClient.Proxy = New-Object System.Net.WebProxy($script:ProxyUrl, $true)
+                    }
                     
                     # Create proper multipart form data
                     $boundary = [System.Guid]::NewGuid().ToString()
@@ -334,7 +434,7 @@ function Invoke-LogUpload {
                                 identifier_string = $script:IdentifierString
                             }
                             
-                            $notifyResponse = Invoke-RestMethod -Uri $script:NotifyUrl -Method Post -Body $notifyData -ContentType "application/x-www-form-urlencoded" -TimeoutSec 30
+                            $notifyResponse = Invoke-RestMethod -Uri $script:NotifyUrl -Method Post -Body $notifyData -ContentType "application/x-www-form-urlencoded" -TimeoutSec 30 @proxySplat
                             Write-ColoredOutput "NISP Support Team was notified about the file!" "Green"
                         }
                         catch {
@@ -366,8 +466,11 @@ function Invoke-LogUpload {
                                 "--retry", "2"
                                 "--retry-delay", "5"
                                 "--user-agent", "PowerShell-DCVLogCollector/1.0"
-                                $script:UploadUrl
                             )
+                            if (-not [string]::IsNullOrWhiteSpace($script:ProxyUrl)) {
+                                $curlArgs += @("--proxy", $script:ProxyUrl)
+                            }
+                            $curlArgs += $script:UploadUrl
                             
                             $curlResult = & $curlPath.Source @curlArgs 2>&1
                             
@@ -382,7 +485,7 @@ function Invoke-LogUpload {
                                         identifier_string = $script:IdentifierString
                                     }
                                     
-                                    $notifyResponse = Invoke-RestMethod -Uri $script:NotifyUrl -Method Post -Body $notifyData -ContentType "application/x-www-form-urlencoded" -TimeoutSec 30
+                                    $notifyResponse = Invoke-RestMethod -Uri $script:NotifyUrl -Method Post -Body $notifyData -ContentType "application/x-www-form-urlencoded" -TimeoutSec 30 @proxySplat
                                     Write-ColoredOutput "NISP Support Team was notified about the file!" "Green"
                                 }
                                 catch {
@@ -437,22 +540,32 @@ function Remove-TempFiles {
     $zipPath = Join-Path -Path $PSScriptRoot -ChildPath $script:CompressedFileName
     
     if (Test-Path $zipPath) {
-        Write-ColoredOutput "Do you want to delete the $script:CompressedFileName?" "Green"
-        Write-Host "If you have no internet to upload the file, you can manually send to NISP Support Team."
-        Write-Host "Write Yes/Y to delete. Any other response will keep the file."
-        
-        $userAnswer = Read-Host
-        
-        if ($userAnswer -match "^(y|yes)$") {
-            Remove-Item -Path $zipPath -Force
-            Write-ColoredOutput "File deleted." "Green"
-        }
-        else {
+        if ($script:NonInteractive) {
+            # No prompts in non-interactive mode: always keep the file.
             Write-ColoredOutput "File kept at: $zipPath" "Green"
-            # Also keep password file if it exists
             $passwordFile = [System.IO.Path]::ChangeExtension($zipPath, ".password.txt")
             if (Test-Path $passwordFile) {
                 Write-ColoredOutput "Password file kept at: $passwordFile" "Yellow"
+            }
+        }
+        else {
+            Write-ColoredOutput "Do you want to delete the $script:CompressedFileName?" "Green"
+            Write-Host "If you have no internet to upload the file, you can manually send to NISP Support Team."
+            Write-Host "Write Yes/Y to delete. Any other response will keep the file."
+
+            $userAnswer = Read-Host
+
+            if ($userAnswer -match "^(y|yes)$") {
+                Remove-Item -Path $zipPath -Force
+                Write-ColoredOutput "File deleted." "Green"
+            }
+            else {
+                Write-ColoredOutput "File kept at: $zipPath" "Green"
+                # Also keep password file if it exists
+                $passwordFile = [System.IO.Path]::ChangeExtension($zipPath, ".password.txt")
+                if (Test-Path $passwordFile) {
+                    Write-ColoredOutput "Password file kept at: $passwordFile" "Yellow"
+                }
             }
         }
     }
@@ -1027,12 +1140,24 @@ function New-LogBundle {
 
 function Invoke-LogCompression {
     try {
-        $script:EncryptPassword = Generate-RandomPassword -Length 32
         $zipPath = Join-Path -Path $PSScriptRoot -ChildPath $script:CompressedFileName
-        
+
+        if ($script:SkipEncryption) {
+            # --without-encryption: produce a plain ZIP with no password.
+            Write-ColoredOutput "Compressing log collection (no encryption)..." "Green"
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+            [System.IO.Compression.ZipFile]::CreateFromDirectory($script:HostnameBundlePath, $zipPath)
+            $script:EncryptPassword = ""
+            Write-ColoredOutput "Compression completed successfully (unencrypted)" "Green"
+            return
+        }
+
+        $script:EncryptPassword = Generate-RandomPassword -Length 32
+
         Write-ColoredOutput "Compressing log collection..." "Green"
         $success = New-PasswordProtectedZip -SourcePath $script:HostnameBundlePath -DestinationPath $zipPath -Password $script:EncryptPassword
-        
+
         if ($success) {
             Write-ColoredOutput "Compression completed successfully" "Green"
         }
@@ -1050,12 +1175,23 @@ function Main {
     try {
         Show-WelcomeMessage
         New-LogBundle -OutputPath $PSScriptRoot
+
+        # --without-compression: keep the logs as a plain directory and stop here.
+        # (This mode also implies --without-encryption and --without-upload.)
+        if ($script:SkipCompression) {
+            Write-ColoredOutput "Skipping compression (--without-compression)." "Yellow"
+            Write-ColoredOutput "Logs were kept as a directory at:" "Green"
+            Write-ColoredOutput $script:HostnameBundlePath "Green"
+            Show-ByeByeMessage
+            return
+        }
+
         Invoke-LogCompression
-        
+
         $zipPath = Join-Path -Path $PSScriptRoot -ChildPath $script:CompressedFileName
         if (Test-Path $zipPath) {
             $zipSizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
-            if ($zipSizeMB -gt 500) {
+            if ($zipSizeMB -gt 500 -and -not $script:NonInteractive) {
                 Write-ColoredOutput "The compressed file is $zipSizeMB MB." "Yellow"
                 Write-ColoredOutput "Would you like to remove Crash Dumps and Event Logs to reduce the file size? (Y/N):" "Yellow"
                 $reduceConfirm = Read-Host
@@ -1080,10 +1216,20 @@ function Main {
                 }
             }
             if (Test-Path $zipPath) {
-                Invoke-LogUpload -FilePath $zipPath
+                if ($script:SkipUpload) {
+                    Write-ColoredOutput "Skipping upload (--without-upload). File saved locally at:" "Yellow"
+                    Write-ColoredOutput $zipPath "Green"
+                    $passwordFile = [System.IO.Path]::ChangeExtension($zipPath, ".password.txt")
+                    if (Test-Path $passwordFile) {
+                        Write-ColoredOutput "Password file: $passwordFile" "Yellow"
+                    }
+                }
+                else {
+                    Invoke-LogUpload -FilePath $zipPath
+                }
             }
         }
-        
+
         Remove-TempFiles
         Show-ByeByeMessage
     }
@@ -1091,6 +1237,47 @@ function Main {
         Write-Error "Script execution failed: $_"
         exit 1
     }
+}
+
+# ---------------------------------------------------------------------------
+# Parameter parsing (GNU double-dash style flags, read from the $args variable)
+# ---------------------------------------------------------------------------
+$ShowHelp = $false
+
+for ($i = 0; $i -lt $args.Count; $i++) {
+    $arg = [string]$args[$i]
+    switch -Regex ($arg) {
+        '^--without-upload$'      { $script:SkipUpload = $true; break }
+        '^--without-encryption$'  { $script:SkipEncryption = $true; break }
+        '^--collect-logs$'        { $script:NonInteractive = $true; break }
+        '^--without-compression$' { $script:SkipCompression = $true; break }
+        '^--proxy$'               { $i++; $script:ProxyUrl = [string]$args[$i]; break }
+        '^--proxy=.*$'            { $script:ProxyUrl = $arg.Substring('--proxy='.Length); break }
+        '^--message$'             { $i++; $script:Message = [string]$args[$i]; break }
+        '^--message=.*$'          { $script:Message = $arg.Substring('--message='.Length); break }
+        '^(--help|-h|-\?|/\?)$'   { $ShowHelp = $true; break }
+        '^(--force|-Force)$'      { break }  # accepted for backward compatibility (no-op)
+        default {
+            Write-ColoredOutput "Unknown parameter: $arg" "Red"
+            $ShowHelp = $true
+        }
+    }
+}
+
+if ($ShowHelp) {
+    Show-Help
+    exit 0
+}
+
+# --without-compression implies --without-encryption and --without-upload.
+if ($script:SkipCompression) {
+    $script:SkipEncryption = $true
+    $script:SkipUpload = $true
+}
+
+# An identifier supplied via --message is used wherever the identifier is needed.
+if (-not [string]::IsNullOrWhiteSpace($script:Message)) {
+    $script:IdentifierString = $script:Message
 }
 
 Main
