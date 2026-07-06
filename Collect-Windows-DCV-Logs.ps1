@@ -36,11 +36,17 @@ Add-Type -AssemblyName System.Web
 $script:DCVPath = 'C:\Program Files\NICE\DCV\Server\bin\dcv.exe'
 $script:MetadataBaseUrl = 'http://169.254.169.254/latest'
 $script:LogBundleName = 'DCVLogBundle'
+$script:CollectionScriptVersion = '2026.08'
 $script:Hostname = $env:COMPUTERNAME
 $script:CompressedFileName = "dcv_logs_collection_$($script:Hostname).zip"
 $script:UploadDomain = 'https://dcv-logs.ni-sp.com'
 $script:UploadUrl = "$script:UploadDomain/upload.php"
 $script:NotifyUrl = "$script:UploadDomain/notify.php"
+# AI log analysis: upload the (unencrypted) bundle to the NI SP upload service,
+# then request an analysis from Deep NI SP, which returns a private report link.
+$script:UploadServiceBase = 'https://ni-sp.com:9443'
+$script:DeepAiBase = 'https://deep.ni-sp.com'
+$script:ProductKey = 'dcv-windows'
 
 # Global variables
 $script:IdentifierString = ""
@@ -55,7 +61,10 @@ $script:SkipEncryption  = $false   # --without-encryption
 $script:SkipCompression = $false   # --without-compression
 $script:NonInteractive  = $false   # --collect-logs (run with no interactive menu)
 $script:ProxyUrl        = ""        # --proxy
-$script:Message         = ""        # --message (identifier for NI SP Support Team)
+$script:Message         = ""        # --message (deprecated; used as the problem text)
+$script:SupportName     = ""        # --name  (for the AI analysis request)
+$script:SupportEmail    = ""        # --email (for the AI analysis request)
+$script:SupportProblem  = ""        # --problem (short problem description)
 
 function Write-ColoredOutput {
     param(
@@ -88,27 +97,30 @@ function Show-Help {
     Write-Host "  --collect-logs          Only collect logs (no interactive menu / prompts)."
     Write-Host "  --proxy <url>           Use a proxy for uploading"
     Write-Host "                          (e.g. http://proxy:8080, socks5://proxy:1080)."
-    Write-Host "  --message <text>        Identifier text for the NI SP Support Team"
-    Write-Host "                          (e.g. e-mail, name, company); skips the interactive prompt."
+    Write-Host "  --name <text>           Your name or company (for the AI analysis request)."
+    Write-Host "  --email <addr>          Your e-mail so NI SP Support can reach you."
+    Write-Host "  --problem <text>        Short description of the problem you are seeing."
+    Write-Host "  --message <text>        Deprecated alias; used as the problem description."
     Write-Host "  --without-compression   Skip compression (keeps logs as a directory)."
     Write-Host "                          Also implicitly sets --without-encryption and --without-upload."
     Write-Host "  --help, -h              Show this help message and exit."
+    Write-Host ""
+    Write-Host "  The logs are uploaded to NI SP and sent to Deep NI SP for an automatic AI"
+    Write-Host "  analysis; the script prints a private report link (ready within ~30 minutes)."
+    Write-Host "  --name, --email and --problem are mandatory for a non-interactive run."
     Write-Host ""
     Write-ColoredOutput "EXAMPLES:" "Yellow"
     Write-Host "  # Interactive run (default behaviour)"
     Write-Host "  .\Collect-Windows-DCV-Logs.ps1"
     Write-Host ""
-    Write-Host "  # Fully unattended collection + upload with a known identifier"
-    Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --message ""jane@acme.com"""
+    Write-Host "  # Fully unattended collection + AI analysis"
+    Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --name ""ACME"" --email jane@acme.com --problem ""black screen"""
     Write-Host ""
     Write-Host "  # Collect and keep the file locally, no upload"
     Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --without-upload"
     Write-Host ""
     Write-Host "  # Collect raw logs as a plain directory (no zip, no encryption, no upload)"
     Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --without-compression"
-    Write-Host ""
-    Write-Host "  # Upload through a proxy"
-    Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --message ""me"" --proxy ""http://proxy:8080"""
     Write-Host "#################################################"
 }
 
@@ -123,15 +135,12 @@ function Get-ProxySplat {
 }
 
 function Show-WelcomeMessage {
-    # Non-interactive mode (--collect-logs): no prompts at all.
+    # Non-interactive mode (--collect-logs): no prompts. Name/email/problem must
+    # have been supplied via flags (Get-SupportDetails aborts otherwise).
     if ($script:NonInteractive) {
         Write-ColoredOutput "NI SP DCV Log Collection Tool (non-interactive mode)" "Green"
-        if ([string]::IsNullOrWhiteSpace($script:IdentifierString)) {
-            $script:IdentifierString = "$($script:Hostname)_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
-            Write-Host "No --message provided. Using default identifier: $script:IdentifierString"
-        }
-        else {
-            Write-Host "Using identifier: $script:IdentifierString"
+        if (-not $script:SkipUpload) {
+            Get-SupportDetails
         }
         # GPO results may be sensitive; do not collect them unattended.
         $script:CollectGpoResults = $false
@@ -173,20 +182,10 @@ function Show-WelcomeMessage {
     }
     
     Write-Host ""
-    if (-not [string]::IsNullOrWhiteSpace($script:IdentifierString)) {
-        # Identifier supplied via --message; skip the interactive prompt.
-        Write-Host "Using identifier from --message: $script:IdentifierString"
-    }
-    else {
-        Write-Host "Write any text that will identify you for NISP Support Team. Can be e-mail, name, e-mail subject, company name etc."
-        Write-ColoredOutput "(This field is required)" "Yellow"
-
-        do {
-            $script:IdentifierString = Read-Host
-            if ([string]::IsNullOrWhiteSpace($script:IdentifierString)) {
-                Write-ColoredOutput "Identifier is required. Please enter a valid identifier." "Red"
-            }
-        } while ([string]::IsNullOrWhiteSpace($script:IdentifierString))
+    # Name, e-mail and a short problem description are mandatory for the AI
+    # analysis request (not needed with --without-upload).
+    if (-not $script:SkipUpload) {
+        Get-SupportDetails
     }
 
     Write-Host ""
@@ -256,11 +255,121 @@ function New-PasswordProtectedZip {
     }
 }
 
+# Collect the mandatory contact details for the AI analysis request. Values may
+# be supplied non-interactively via --name / --email / --problem; interactive
+# runs are prompted. Non-interactive runs missing a value abort with an error.
+function Get-SupportDetails {
+    $emailRegex = '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+
+    if ([string]::IsNullOrWhiteSpace($script:SupportName)) {
+        if ($script:NonInteractive) { Write-ColoredOutput "ERROR: --name is required in non-interactive mode." "Red"; exit 26 }
+        do {
+            Write-ColoredOutput "[REQUIRED] Your name or company:" "Yellow"
+            $script:SupportName = Read-Host
+        } while ([string]::IsNullOrWhiteSpace($script:SupportName))
+    }
+
+    if ([string]::IsNullOrWhiteSpace($script:SupportEmail)) {
+        if ($script:NonInteractive) { Write-ColoredOutput "ERROR: --email is required in non-interactive mode." "Red"; exit 26 }
+        do {
+            Write-ColoredOutput "[REQUIRED] Your e-mail (so NI SP Support can reach you):" "Yellow"
+            $script:SupportEmail = Read-Host
+        } while ($script:SupportEmail -notmatch $emailRegex)
+    }
+    elseif ($script:SupportEmail -notmatch $emailRegex) {
+        Write-ColoredOutput "ERROR: --email is not a valid address." "Red"; exit 26
+    }
+
+    if ([string]::IsNullOrWhiteSpace($script:SupportProblem)) {
+        if ($script:NonInteractive) { Write-ColoredOutput "ERROR: --problem is required in non-interactive mode." "Red"; exit 26 }
+        do {
+            Write-ColoredOutput "[REQUIRED] Briefly describe the problem you are seeing:" "Yellow"
+            $script:SupportProblem = Read-Host
+        } while ([string]::IsNullOrWhiteSpace($script:SupportProblem))
+    }
+
+    Write-ColoredOutput "By continuing, you authorize NI SP to process the (unencrypted) log bundle to generate an AI analysis." "Green"
+}
+
+# Upload a bundle to the NI SP upload service (tus protocol) and request an AI
+# log analysis from Deep NI SP. Prints the private report link on success; on
+# any failure it keeps the bundle locally and prints the manual-upload hint.
+function Invoke-SendToSupport {
+    param(
+        [string]$FilePath
+    )
+
+    $proxySplat = Get-ProxySplat
+    if ($proxySplat.Count -gt 0) { Write-Host "Using proxy: $script:ProxyUrl" }
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
+
+    try {
+        $fileName    = [System.IO.Path]::GetFileName($FilePath)
+        $fileBytes   = [System.IO.File]::ReadAllBytes($FilePath)
+        $fileNameB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($fileName))
+        $fileSizeMB  = [math]::Round($fileBytes.Length / 1MB, 2)
+
+        Write-ColoredOutput "Uploading the logs to NI SP ($fileSizeMB MB)..." "Green"
+
+        # 1) tus create — declare the length + filename, receive an upload Location.
+        $createHeaders = @{
+            'Tus-Resumable'   = '1.0.0'
+            'Upload-Length'   = "$($fileBytes.Length)"
+            'Upload-Metadata' = "filename $fileNameB64"
+        }
+        $createResp = Invoke-WebRequest -Uri "$script:UploadServiceBase/files/" -Method Post -Headers $createHeaders -TimeoutSec 60 -UseBasicParsing @proxySplat
+        $location = $createResp.Headers['Location']
+        if ([string]::IsNullOrWhiteSpace($location)) { throw "the upload service did not return a Location." }
+
+        # 2) tus send bytes — single PATCH of the whole file at offset 0.
+        $patchHeaders = @{
+            'Tus-Resumable' = '1.0.0'
+            'Upload-Offset' = '0'
+        }
+        Invoke-WebRequest -Uri $location -Method Patch -Headers $patchHeaders -Body $fileBytes -ContentType 'application/offset+octet-stream' -UseBasicParsing @proxySplat | Out-Null
+
+        # 3) sign — turn the upload id into a signed, time-limited download link.
+        $uploadId = ($location.TrimEnd('/') -split '/')[-1]
+        $signResp = Invoke-RestMethod -Uri "$script:UploadServiceBase/sign/$uploadId" -TimeoutSec 60 -UseBasicParsing @proxySplat
+        if ([string]::IsNullOrWhiteSpace($signResp.url)) { throw "no download link was returned." }
+        $downloadUrl = "$script:UploadServiceBase$($signResp.url)"
+
+        # 4) request AI analysis — Deep NI SP queues the job and returns a report link.
+        Write-ColoredOutput "Requesting AI log analysis..." "Green"
+        $form = @{
+            product             = $script:ProductKey
+            problem_description = $script:SupportProblem
+            contact_name        = $script:SupportName
+            contact_email       = $script:SupportEmail
+            consent             = 'on'
+            source_url          = $downloadUrl
+        }
+        $analysisResp = Invoke-RestMethod -Uri "$script:DeepAiBase/api/upload" -Method Post -Body $form -TimeoutSec 60 -UseBasicParsing @proxySplat
+        if ([string]::IsNullOrWhiteSpace($analysisResp.result_url)) { throw "the analysis request was rejected." }
+        $reportUrl = "$script:DeepAiBase$($analysisResp.result_url)"
+
+        Write-Host "#########################################################################"
+        Write-ColoredOutput "Your logs were sent to NI SP for AI analysis." "Green"
+        Write-ColoredOutput "Your report will be ready within ~30 minutes at:" "Green"
+        Write-ColoredOutput $reportUrl "Yellow"
+        Write-ColoredOutput "Bookmark this private link - it is how you and NI SP Support read the result." "Green"
+        Write-Host "#########################################################################"
+    }
+    catch {
+        Write-Warning "Automatic send / analysis failed: $_"
+        Write-ColoredOutput "The log bundle was kept locally at:" "Yellow"
+        Write-ColoredOutput $FilePath "Green"
+        Write-ColoredOutput "You can upload it manually to: $script:UploadServiceBase/" "Green"
+        Write-ColoredOutput "then use the 'Ask Deep NI SP to analyze these logs' button." "Green"
+    }
+}
+
 function Invoke-LogUpload {
     param(
         [string]$FilePath
     )
-    
+
     $fileInfo = Get-Item $FilePath
     $fileSizeMB = [math]::Round($fileInfo.Length / 1MB, 2)
     Write-Host "File size: $fileSizeMB MB"
@@ -908,6 +1017,22 @@ function New-LogBundle {
         
         $null = New-Item -Path $script:BundlePath -ItemType Directory -Force
 
+        # Product-identification manifest so downstream tools (e.g. the AI Log
+        # Analysis service) can reliably detect what this bundle is.
+        try {
+            $meta = [ordered]@{
+                product          = 'dcv-windows'
+                script_version   = $script:CollectionScriptVersion
+                hostname         = $script:Hostname
+                collected_at_utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                schema           = 1
+            }
+            $meta | ConvertTo-Json | Set-Content -Path (Join-Path $script:BundlePath 'collection_meta.json') -Encoding UTF8
+        }
+        catch {
+            Write-Warning "Failed to write collection_meta.json: $_"
+        }
+
         Write-ColoredOutput "Collecting log bundle information..." "Green"
 
         try {
@@ -1219,13 +1344,11 @@ function Main {
                 if ($script:SkipUpload) {
                     Write-ColoredOutput "Skipping upload (--without-upload). File saved locally at:" "Yellow"
                     Write-ColoredOutput $zipPath "Green"
-                    $passwordFile = [System.IO.Path]::ChangeExtension($zipPath, ".password.txt")
-                    if (Test-Path $passwordFile) {
-                        Write-ColoredOutput "Password file: $passwordFile" "Yellow"
-                    }
+                    Write-ColoredOutput "You can upload it manually to: $script:UploadServiceBase/" "Green"
+                    Write-ColoredOutput "then use the 'Ask Deep NI SP to analyze these logs' button." "Green"
                 }
                 else {
-                    Invoke-LogUpload -FilePath $zipPath
+                    Invoke-SendToSupport -FilePath $zipPath
                 }
             }
         }
@@ -1255,6 +1378,12 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         '^--proxy=.*$'            { $script:ProxyUrl = $arg.Substring('--proxy='.Length); break }
         '^--message$'             { $i++; $script:Message = [string]$args[$i]; break }
         '^--message=.*$'          { $script:Message = $arg.Substring('--message='.Length); break }
+        '^--name$'                { $i++; $script:SupportName = [string]$args[$i]; break }
+        '^--name=.*$'             { $script:SupportName = $arg.Substring('--name='.Length); break }
+        '^--email$'               { $i++; $script:SupportEmail = [string]$args[$i]; break }
+        '^--email=.*$'            { $script:SupportEmail = $arg.Substring('--email='.Length); break }
+        '^--problem$'             { $i++; $script:SupportProblem = [string]$args[$i]; break }
+        '^--problem=.*$'          { $script:SupportProblem = $arg.Substring('--problem='.Length); break }
         '^(--help|-h|-\?|/\?)$'   { $ShowHelp = $true; break }
         '^(--force|-Force)$'      { break }  # accepted for backward compatibility (no-op)
         default {
@@ -1275,9 +1404,12 @@ if ($script:SkipCompression) {
     $script:SkipUpload = $true
 }
 
-# An identifier supplied via --message is used wherever the identifier is needed.
-if (-not [string]::IsNullOrWhiteSpace($script:Message)) {
-    $script:IdentifierString = $script:Message
+# The AI analysis reads the logs, so the uploaded bundle is always unencrypted.
+$script:SkipEncryption = $true
+
+# --message is a deprecated alias for the problem description.
+if (-not [string]::IsNullOrWhiteSpace($script:Message) -and [string]::IsNullOrWhiteSpace($script:SupportProblem)) {
+    $script:SupportProblem = $script:Message
 }
 
 Main
