@@ -981,6 +981,34 @@ function New-LogBundle {
     }
 }
 
+# Before compressing, drop any individual crash dump or event log file that is
+# larger than the given threshold (default 30 MB). Large single files rarely add
+# troubleshooting value and bloat the bundle; smaller ones are kept.
+function Remove-OversizedLogFiles {
+    param(
+        [int]$MaxSizeMB = 30
+    )
+
+    $maxBytes = $MaxSizeMB * 1MB
+    $targets = @(
+        (Join-Path -Path $script:HostnameBundlePath -ChildPath "CrashDumps"),
+        (Join-Path -Path $script:HostnameBundlePath -ChildPath "EventLogs")
+    )
+
+    foreach ($target in $targets) {
+        if (-not (Test-Path $target)) { continue }
+
+        $oversized = Get-ChildItem -Path $target -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Length -gt $maxBytes }
+
+        foreach ($file in $oversized) {
+            $sizeMB = [math]::Round($file.Length / 1MB, 2)
+            Write-ColoredOutput "Removing oversized file ($sizeMB MB, > $MaxSizeMB MB): $($file.Name)" "Yellow"
+            Remove-Item -Path $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Invoke-LogCompression {
     try {
         $zipPath = Join-Path -Path $PSScriptRoot -ChildPath $script:CompressedFileName
@@ -1028,6 +1056,9 @@ function Main {
             Show-ByeByeMessage
             return
         }
+
+        # Drop any crash dump / event log file over 30 MB before compressing.
+        Remove-OversizedLogFiles -MaxSizeMB 30
 
         Invoke-LogCompression
 
