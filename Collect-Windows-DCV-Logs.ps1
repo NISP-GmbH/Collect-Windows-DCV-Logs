@@ -981,31 +981,93 @@ function New-LogBundle {
     }
 }
 
-# Before compressing, drop any individual crash dump or event log file that is
-# larger than the given threshold (default 30 MB). Large single files rarely add
-# troubleshooting value and bloat the bundle; smaller ones are kept.
-function Remove-OversizedLogFiles {
+# Returns $true if the file looks binary (a NUL byte in the first ~8 KB is a
+# reliable, extension-independent signal). Empty/unreadable files -> $false (text).
+function Test-IsBinaryFile {
+    param([string]$Path)
+    try {
+        $fs = [System.IO.File]::OpenRead($Path)
+        try {
+            $buffer = New-Object byte[] 8192
+            $read = $fs.Read($buffer, 0, $buffer.Length)
+            for ($i = 0; $i -lt $read; $i++) {
+                if ($buffer[$i] -eq 0) { return $true }
+            }
+            return $false
+        } finally { $fs.Close() }
+    } catch { return $false }
+}
+
+# Applies the oversized-file rule to a single file:
+#   Binary -> delete + write "<name>.REMOVED.txt" placeholder.
+#   Text   -> keep last $TailLines lines, prepend a header comment line.
+function Resolve-OversizedFile {
     param(
-        [int]$MaxSizeMB = 30
+        [System.IO.FileInfo]$File,
+        [int]$TailLines = 15000
     )
-
-    $maxBytes = $MaxSizeMB * 1MB
-    $targets = @(
-        (Join-Path -Path $script:HostnameBundlePath -ChildPath "CrashDumps"),
-        (Join-Path -Path $script:HostnameBundlePath -ChildPath "EventLogs")
-    )
-
-    foreach ($target in $targets) {
-        if (-not (Test-Path $target)) { continue }
-
-        $oversized = Get-ChildItem -Path $target -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Length -gt $maxBytes }
-
-        foreach ($file in $oversized) {
-            $sizeMB = [math]::Round($file.Length / 1MB, 2)
-            Write-ColoredOutput "Removing oversized file ($sizeMB MB, > $MaxSizeMB MB): $($file.Name)" "Yellow"
-            Remove-Item -Path $file.FullName -Force -ErrorAction SilentlyContinue
+    $sizeMB = [math]::Round($File.Length / 1MB, 2)
+    try {
+        if (Test-IsBinaryFile -Path $File.FullName) {
+            Write-ColoredOutput "Dropping large binary file ($sizeMB MB): $($File.Name)" "Yellow"
+            $placeholder = Join-Path $File.DirectoryName "$($File.Name).REMOVED.txt"
+            "The original file '$($File.Name)' ($sizeMB MB) was removed by the log collector because it was too large (> 30 MB binary)." |
+                Set-Content -Path $placeholder -Encoding UTF8
+            Remove-Item -Path $File.FullName -Force -ErrorAction SilentlyContinue
         }
+        else {
+            Write-ColoredOutput "Truncating large text file ($sizeMB MB -> last $TailLines lines): $($File.Name)" "Yellow"
+            $header = "# NOTE: This file was $sizeMB MB and was truncated by the log collector; only the last $TailLines lines are kept."
+            $tail   = Get-Content -Path $File.FullName -Tail $TailLines -ErrorAction Stop
+            Set-Content -Path $File.FullName -Value (@($header) + $tail) -Encoding UTF8
+        }
+    } catch {
+        Write-Warning "Failed to reduce oversized file $($File.Name): $_"
+    }
+}
+
+# Before compressing, reduce the bundle in two passes:
+#   (A) Every file > MaxFileSizeMB is reduced (binary dropped, text tailed).
+#   (B) If the bundle still exceeds MaxDirSizeMB, reduce remaining files
+#       largest-first until the bundle drops below the threshold.
+function Optimize-BundleFileSizes {
+    param(
+        [int]$MaxFileSizeMB = 30,
+        [int]$MaxDirSizeMB  = 500,
+        [int]$TailLines     = 15000
+    )
+    $root = $script:HostnameBundlePath
+    if (-not (Test-Path $root)) { return }
+    $maxFileBytes = $MaxFileSizeMB * 1MB
+    $maxDirBytes  = $MaxDirSizeMB  * 1MB
+
+    # Scenario (A): all files over the per-file threshold.
+    Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Length -gt $maxFileBytes } |
+        ForEach-Object { Resolve-OversizedFile -File $_ -TailLines $TailLines }
+
+    # Scenario (B): whole-directory threshold — largest-first, stop when under.
+    $dirBytes = (Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+        Measure-Object -Property Length -Sum).Sum
+    if ($dirBytes -gt $maxDirBytes) {
+        $dirMB = [math]::Round($dirBytes / 1MB, 2)
+        Write-ColoredOutput "Bundle is $dirMB MB (> $MaxDirSizeMB MB); reducing largest files..." "Yellow"
+        $files = Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+            Sort-Object -Property Length -Descending
+        foreach ($file in $files) {
+            if ($dirBytes -le $maxDirBytes) { break }
+            if (-not (Test-Path $file.FullName)) { continue }
+            $before = $file.Length
+            Resolve-OversizedFile -File $file -TailLines $TailLines
+            # Recompute this file's remaining size (0 if it was a dropped binary;
+            # placeholder file is tiny either way) and update the running total.
+            $after = 0
+            if (Test-Path $file.FullName) { $after = (Get-Item $file.FullName).Length }
+            $dirBytes -= ($before - $after)
+        }
+        $dirBytes = (Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+            Measure-Object -Property Length -Sum).Sum
+        Write-ColoredOutput "Bundle reduced to $([math]::Round($dirBytes / 1MB, 2)) MB." "Green"
     }
 }
 
@@ -1057,48 +1119,22 @@ function Main {
             return
         }
 
-        # Drop any crash dump / event log file over 30 MB before compressing.
-        Remove-OversizedLogFiles -MaxSizeMB 30
+        # Reduce oversized files (Scenario A) and shrink the bundle if it exceeds
+        # 0.5 GB (Scenario B) before compressing.
+        Optimize-BundleFileSizes -MaxFileSizeMB 30 -MaxDirSizeMB 500 -TailLines 15000
 
         Invoke-LogCompression
 
         $zipPath = Join-Path -Path $PSScriptRoot -ChildPath $script:CompressedFileName
         if (Test-Path $zipPath) {
-            $zipSizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
-            if ($zipSizeMB -gt 500 -and -not $script:NonInteractive) {
-                Write-ColoredOutput "The compressed file is $zipSizeMB MB." "Yellow"
-                Write-ColoredOutput "Would you like to remove Crash Dumps and Event Logs to reduce the file size? (Y/N):" "Yellow"
-                $reduceConfirm = Read-Host
-                if ($reduceConfirm -match "^(Y|y|Yes|yes)$") {
-                    Write-ColoredOutput "Removing Crash Dumps and Event Logs from the bundle..." "Yellow"
-                    $eventLogsPath = Join-Path -Path $script:HostnameBundlePath -ChildPath "EventLogs"
-                    $crashDumpsPath = Join-Path -Path $script:HostnameBundlePath -ChildPath "CrashDumps"
-                    if (Test-Path $eventLogsPath) { Remove-Item -Path $eventLogsPath -Recurse -Force }
-                    if (Test-Path $crashDumpsPath) { Remove-Item -Path $crashDumpsPath -Recurse -Force }
-
-                    Remove-Item -Path $zipPath -Force
-                    $passwordFile = [System.IO.Path]::ChangeExtension($zipPath, ".password.txt")
-                    if (Test-Path $passwordFile) { Remove-Item -Path $passwordFile -Force }
-
-                    Write-ColoredOutput "Re-compressing log collection..." "Green"
-                    Invoke-LogCompression
-
-                    if (Test-Path $zipPath) {
-                        $newSizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 2)
-                        Write-ColoredOutput "New file size: $newSizeMB MB" "Green"
-                    }
-                }
+            if ($script:SkipUpload) {
+                Write-ColoredOutput "Skipping upload (--without-upload). File saved locally at:" "Yellow"
+                Write-ColoredOutput $zipPath "Green"
+                Write-ColoredOutput "You can upload it manually to: $script:UploadServiceBase/" "Green"
+                Write-ColoredOutput "then use the 'Ask Deep NI SP to analyze these logs' button." "Green"
             }
-            if (Test-Path $zipPath) {
-                if ($script:SkipUpload) {
-                    Write-ColoredOutput "Skipping upload (--without-upload). File saved locally at:" "Yellow"
-                    Write-ColoredOutput $zipPath "Green"
-                    Write-ColoredOutput "You can upload it manually to: $script:UploadServiceBase/" "Green"
-                    Write-ColoredOutput "then use the 'Ask Deep NI SP to analyze these logs' button." "Green"
-                }
-                else {
-                    Invoke-SendToSupport -FilePath $zipPath
-                }
+            else {
+                Invoke-SendToSupport -FilePath $zipPath
             }
         }
 
