@@ -641,13 +641,37 @@ function Get-RecentWinEvents {
     Write-Host "Event log copy complete. Copied $copiedCount files, skipped $skippedCount files."
 }
 
+# Crash dumps can be several GB (a kernel dump of a machine with a lot of RAM).
+# Copying one just to have Optimize-BundleFileSizes delete it afterwards costs a
+# full read+write of that size, so oversized dumps are skipped at the source and
+# a "<name>.REMOVED.txt" placeholder is written in the bundle instead.
+function Copy-CrashDumpFile {
+    param(
+        [System.IO.FileInfo]$DumpFile,
+        [string]$TargetDir,
+        [int]$MaxSizeMB
+    )
+    $sizeMB = [math]::Round($DumpFile.Length / 1MB, 2)
+    if ($DumpFile.Length -gt ($MaxSizeMB * 1MB)) {
+        Write-ColoredOutput "Skipping large crash dump ($sizeMB MB > $MaxSizeMB MB): $($DumpFile.Name)" "Yellow"
+        $placeholder = Join-Path $TargetDir "$($DumpFile.Name).REMOVED.txt"
+        "The crash dump '$($DumpFile.FullName)' ($sizeMB MB) was not collected because it was too large (> $MaxSizeMB MB). It is still available on the machine." |
+            Set-Content -Path $placeholder -Encoding UTF8
+        return $false
+    }
+    Write-Verbose "Copying crash dump: $($DumpFile.FullName) - Last modified: $($DumpFile.LastWriteTime)"
+    Copy-Item -Path $DumpFile.FullName -Destination $TargetDir -Force -ErrorAction SilentlyContinue
+    return $true
+}
+
 function Get-RecentCrashDumps {
     [CmdletBinding()]
     param(
         [string]$DestinationPath,
-        [int]$DaysBack = 7
+        [int]$DaysBack = 7,
+        [int]$MaxDumpSizeMB = 30
     )
-    
+
     # Calculate the date from which to copy crash dumps
     $cutoffDate = (Get-Date).AddDays(-$DaysBack)
     $formattedDate = $cutoffDate.ToString("yyyy-MM-dd")
@@ -671,16 +695,19 @@ function Get-RecentCrashDumps {
     
     $copiedCount = 0
     $skippedCount = 0
-    
+    $oversizedCount = 0
+
     foreach ($location in $dumpLocations) {
         if (Test-Path -Path $location) {
             if ((Get-Item $location) -is [System.IO.FileInfo]) {
                 $dumpFile = Get-Item $location
                 if ($dumpFile.LastWriteTime -ge $cutoffDate) {
                     try {
-                        Write-Verbose "Copying crash dump file: $($dumpFile.FullName) - Last modified: $($dumpFile.LastWriteTime)"
-                        Copy-Item -Path $dumpFile.FullName -Destination $DestinationPath -Force -ErrorAction SilentlyContinue
-                        $copiedCount++
+                        if (Copy-CrashDumpFile -DumpFile $dumpFile -TargetDir $DestinationPath -MaxSizeMB $MaxDumpSizeMB) {
+                            $copiedCount++
+                        } else {
+                            $oversizedCount++
+                        }
                     } catch {
                         Write-Warning "Failed to copy crash dump file $($dumpFile.FullName): $_"
                     }
@@ -701,10 +728,12 @@ function Get-RecentCrashDumps {
                             if (-not (Test-Path -Path $targetDir)) {
                                 New-Item -Path $targetDir -ItemType Directory -Force | Out-Null
                             }
-                            
-                            Write-Verbose "Copying crash dump: $($dumpFile.FullName) - Last modified: $($dumpFile.LastWriteTime)"
-                            Copy-Item -Path $dumpFile.FullName -Destination $targetDir -Force -ErrorAction SilentlyContinue
-                            $copiedCount++
+
+                            if (Copy-CrashDumpFile -DumpFile $dumpFile -TargetDir $targetDir -MaxSizeMB $MaxDumpSizeMB) {
+                                $copiedCount++
+                            } else {
+                                $oversizedCount++
+                            }
                         } catch {
                             Write-Warning "Failed to copy crash dump $($dumpFile.FullName): $_"
                         }
@@ -719,7 +748,7 @@ function Get-RecentCrashDumps {
         }
     }
     
-    Write-Host "Crash dump collection complete. Copied $copiedCount files, skipped $skippedCount files."
+    Write-Host "Crash dump collection complete. Copied $copiedCount files, skipped $skippedCount files (too old), skipped $oversizedCount files (larger than $MaxDumpSizeMB MB)."
 }
 
 function New-LogBundle {
@@ -846,7 +875,7 @@ function New-LogBundle {
         try {
             Write-Host "Collecting Windows Crash Dumps..."
             $crashDumpsPath = Join-Path -Path $script:BundlePath -ChildPath "CrashDumps"
-            Get-RecentCrashDumps -DestinationPath $crashDumpsPath -DaysBack 7 -Verbose
+            Get-RecentCrashDumps -DestinationPath $crashDumpsPath -DaysBack 7 -MaxDumpSizeMB 30
         }
         catch {
             Write-Warning "Failed to copy recent Windows Crash Dumps: $_"
@@ -1109,6 +1138,11 @@ function Main {
         Show-WelcomeMessage
         New-LogBundle -OutputPath $PSScriptRoot
 
+        # Reduce oversized files (Scenario A) and shrink the bundle if it exceeds
+        # 0.5 GB (Scenario B). This runs for every mode, right after the files are
+        # collected, so the bundle is never left oversized on disk either.
+        Optimize-BundleFileSizes -MaxFileSizeMB 30 -MaxDirSizeMB 500 -TailLines 15000
+
         # --without-compression: keep the logs as a plain directory and stop here.
         # (This mode also implies --without-encryption and --without-upload.)
         if ($script:SkipCompression) {
@@ -1118,10 +1152,6 @@ function Main {
             Show-ByeByeMessage
             return
         }
-
-        # Reduce oversized files (Scenario A) and shrink the bundle if it exceeds
-        # 0.5 GB (Scenario B) before compressing.
-        Optimize-BundleFileSizes -MaxFileSizeMB 30 -MaxDirSizeMB 500 -TailLines 15000
 
         Invoke-LogCompression
 
