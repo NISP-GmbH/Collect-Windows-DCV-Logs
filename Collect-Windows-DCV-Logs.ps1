@@ -41,7 +41,7 @@ $script:Hostname = $env:COMPUTERNAME
 $script:CompressedFileName = "dcv_logs_collection_$($script:Hostname).zip"
 # AI log analysis: upload the (unencrypted) bundle to the NI SP upload service,
 # then request an analysis from Deep NI SP, which returns a private report link.
-$script:UploadServiceBase = 'https://ni-sp.com:9443'
+$script:UploadServiceBase = 'https://upload.ni-sp.com'
 $script:DeepAiBase = 'https://deep.ni-sp.com'
 $script:ProductKey = 'dcv-windows'
 
