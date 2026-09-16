@@ -304,6 +304,9 @@ function Invoke-SendToSupport {
         $fileName    = [System.IO.Path]::GetFileName($FilePath)
         $fileBytes   = [System.IO.File]::ReadAllBytes($FilePath)
         $fileNameB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($fileName))
+        # Tag the upload with the product so the upload service does NOT post its own
+        # Slack card — Deep NI SP announces this bundle when the analysis finishes.
+        $productB64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:ProductKey))
         $fileSizeMB  = [math]::Round($fileBytes.Length / 1MB, 2)
 
         Write-ColoredOutput "Uploading the logs to NI SP ($fileSizeMB MB)..." "Green"
@@ -312,7 +315,7 @@ function Invoke-SendToSupport {
         $createHeaders = @{
             'Tus-Resumable'   = '1.0.0'
             'Upload-Length'   = "$($fileBytes.Length)"
-            'Upload-Metadata' = "filename $fileNameB64"
+            'Upload-Metadata' = "filename $fileNameB64,product $productB64"
         }
         $createResp = Invoke-WebRequest -Uri "$script:UploadServiceBase/files/" -Method Post -Headers $createHeaders -TimeoutSec 60 -UseBasicParsing @proxySplat
         $location = $createResp.Headers['Location']
