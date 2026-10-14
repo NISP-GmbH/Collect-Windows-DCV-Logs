@@ -309,13 +309,25 @@ function Invoke-SendToSupport {
         $productB64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:ProductKey))
         $fileSizeMB  = [math]::Round($fileBytes.Length / 1MB, 2)
 
+        # E-mail, problem and consent go into the upload's .info sidecar so the NI SP
+        # upload admin shows who sent the bundle. The problem is capped at 300 chars
+        # (never splitting a surrogate pair) to keep the header small.
+        $metadata = "filename $fileNameB64,product $productB64,consent " +
+            [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('1')) +
+            ",email " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:SupportEmail))
+        if (-not [string]::IsNullOrWhiteSpace($script:SupportProblem)) {
+            $descLen = [Math]::Min(300, $script:SupportProblem.Length)
+            if ($descLen -lt $script:SupportProblem.Length -and [char]::IsHighSurrogate($script:SupportProblem[$descLen - 1])) { $descLen-- }
+            $metadata += ",description " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:SupportProblem.Substring(0, $descLen)))
+        }
+
         Write-ColoredOutput "Uploading the logs to NI SP ($fileSizeMB MB)..." "Green"
 
-        # 1) tus create — declare the length + filename, receive an upload Location.
+        # 1) tus create — declare the length + metadata, receive an upload Location.
         $createHeaders = @{
             'Tus-Resumable'   = '1.0.0'
             'Upload-Length'   = "$($fileBytes.Length)"
-            'Upload-Metadata' = "filename $fileNameB64,product $productB64"
+            'Upload-Metadata' = $metadata
         }
         $createResp = Invoke-WebRequest -Uri "$script:UploadServiceBase/files/" -Method Post -Headers $createHeaders -TimeoutSec 60 -UseBasicParsing @proxySplat
         $location = $createResp.Headers['Location']
