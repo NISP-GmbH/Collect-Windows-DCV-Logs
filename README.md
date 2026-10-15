@@ -25,13 +25,19 @@ The script can also be run unattended using the following options:
 | `--collect-logs` | Only collect logs (no interactive menu / prompts). |
 | `--report-only` | _Not available — this script has no separate report mode._ |
 | `--proxy <url>` | Use a proxy for uploading (e.g. `http://proxy:8080`, `socks5://proxy:1080`). |
-| `--message <text>` | Identifier text for the NI SP Support Team (e.g. e-mail, name, company); skips the interactive prompt. |
+| `--name <text>` | Your name or company, sent with the AI analysis request. |
+| `--email <addr>` | Your e-mail, so NI SP Support can reach you. |
+| `--problem <text>` | Short description of the problem you are seeing. |
+| `--message <text>` | Deprecated alias of `--problem`. |
 | `--without-compression` | Skip compression (keeps logs as a directory). Also implicitly sets `--without-encryption` and `--without-upload`. |
 | `--help`, `-h` | Show the help message and exit. |
 
-In non-interactive mode (`--collect-logs`), if no `--message` is provided the
-script falls back to a default identifier of `<hostname>_<timestamp>`. Group
-Policy (GPO) results are **not** collected unattended, since they can be sensitive.
+`--name`, `--email` and `--problem` are mandatory unless `--without-upload` is
+used. Interactively they are asked for when missing; in non-interactive mode
+(`--collect-logs`) a missing or invalid value stops the script (exit code 26).
+They go to Deep NI SP with the analysis request and are also stored with the
+upload on NI SP's upload service, so NI SP Support can see who sent the bundle.
+Group Policy (GPO) results are **not** collected unattended, since they can be sensitive.
 
 ### Examples
 
@@ -39,8 +45,8 @@ Policy (GPO) results are **not** collected unattended, since they can be sensiti
 # Interactive run (default behaviour)
 .\Collect-Windows-DCV-Logs.ps1
 
-# Fully unattended collection + upload with a known identifier
-.\Collect-Windows-DCV-Logs.ps1 --collect-logs --message "jane@acme.com"
+# Fully unattended collection + upload
+.\Collect-Windows-DCV-Logs.ps1 --collect-logs --name "Jane Doe - ACME" --email jane@acme.com --problem "Black screen after login"
 
 # Collect and keep the file locally, no upload
 .\Collect-Windows-DCV-Logs.ps1 --collect-logs --without-upload
@@ -49,7 +55,7 @@ Policy (GPO) results are **not** collected unattended, since they can be sensiti
 .\Collect-Windows-DCV-Logs.ps1 --collect-logs --without-compression
 
 # Upload through a proxy
-.\Collect-Windows-DCV-Logs.ps1 --collect-logs --message "me" --proxy "http://proxy:8080"
+.\Collect-Windows-DCV-Logs.ps1 --collect-logs --name "Jane Doe - ACME" --email jane@acme.com --problem "Black screen" --proxy "http://proxy:8080"
 ```
 
 # Illustration
