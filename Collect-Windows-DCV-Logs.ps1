@@ -58,9 +58,10 @@ $script:SkipCompression = $false   # --without-compression
 $script:NonInteractive  = $false   # --collect-logs (run with no interactive menu)
 $script:ProxyUrl        = ""        # --proxy
 $script:Message         = ""        # --message (deprecated; used as the problem text)
-$script:SupportName     = ""        # --name  (for the AI analysis request)
-$script:SupportEmail    = ""        # --email (for the AI analysis request)
+$script:SupportName     = ""        # --name  (sent with the upload)
+$script:SupportEmail    = ""        # --email (sent with the upload)
 $script:SupportProblem  = ""        # --problem (short problem description)
+$script:SkipAnalysis    = $false   # --without-analysis (upload only, no Deep NI SP hand-off)
 
 function Write-ColoredOutput {
     param(
@@ -88,12 +89,14 @@ function Show-Help {
     Write-Host ""
     Write-ColoredOutput "OPTIONS:" "Yellow"
     Write-Host "  --without-upload        Skip upload; keep the file locally for manual upload."
+    Write-Host "  --without-analysis      Upload only; do not ask for or request the automatic"
+    Write-Host "                          analysis (NI SP Support is notified of the upload)."
     Write-Host "  --without-encryption    Create the compressed file without encryption"
     Write-Host "                          (on Windows this means a plain ZIP without a password)."
     Write-Host "  --collect-logs          Only collect logs (no interactive menu / prompts)."
     Write-Host "  --proxy <url>           Use a proxy for uploading"
     Write-Host "                          (e.g. http://proxy:8080, socks5://proxy:1080)."
-    Write-Host "  --name <text>           Your name or company (for the AI analysis request)."
+    Write-Host "  --name <text>           Your name or company (sent with the upload)."
     Write-Host "  --email <addr>          Your e-mail so NI SP Support can reach you."
     Write-Host "  --problem <text>        Short description of the problem you are seeing."
     Write-Host "  --message <text>        Deprecated alias; used as the problem description."
@@ -101,15 +104,16 @@ function Show-Help {
     Write-Host "                          Also implicitly sets --without-encryption and --without-upload."
     Write-Host "  --help, -h              Show this help message and exit."
     Write-Host ""
-    Write-Host "  The logs are uploaded to NI SP and sent to Deep NI SP for an automatic AI"
-    Write-Host "  analysis; the script prints a private report link (ready within ~30 minutes)."
+    Write-Host "  The logs are uploaded to NI SP and, if you agree (asked interactively; on by"
+    Write-Host "  default with --collect-logs), sent to Deep NI SP for an automatic analysis;"
+    Write-Host "  the script then prints a private report link (ready within ~30 minutes)."
     Write-Host "  --name, --email and --problem are mandatory for a non-interactive run."
     Write-Host ""
     Write-ColoredOutput "EXAMPLES:" "Yellow"
     Write-Host "  # Interactive run (default behaviour)"
     Write-Host "  .\Collect-Windows-DCV-Logs.ps1"
     Write-Host ""
-    Write-Host "  # Fully unattended collection + AI analysis"
+    Write-Host "  # Fully unattended collection + automatic analysis"
     Write-Host "  .\Collect-Windows-DCV-Logs.ps1 --collect-logs --name ""ACME"" --email jane@acme.com --problem ""black screen"""
     Write-Host ""
     Write-Host "  # Collect and keep the file locally, no upload"
@@ -159,11 +163,11 @@ function Show-WelcomeMessage {
     Write-ColoredOutput "  - NICE DCV logs and configuration" "Yellow"
     Write-ColoredOutput "  - Windows Event Logs (last 7 days)" "Yellow"
     Write-ColoredOutput "  - Windows Crash Dumps (last 7 days)" "Yellow"
-    Write-ColoredOutput "- The collected data will be compressed, encrypted, and uploaded for analysis." "Yellow"
+    Write-ColoredOutput "- The collected data will be compressed and uploaded to NI SP over HTTPS." "Yellow"
     Write-Host "#################################################"
 
     Write-ColoredOutput "This script will collect relevant logs to send to NISP Support Team." "Green"
-    Write-Host "In the end an encrypted file will be created, then it will be securely uploaded to NISP and a notification will be sent to NISP Support Team."
+    Write-Host "In the end a ZIP file will be created and uploaded to NI SP over HTTPS. You will be asked whether to also send it to Deep NI SP for an automatic analysis."
     Write-Host "If you do not have internet access when executing this script, you will have an option to store the file in the end."
     Write-Host ""
     
@@ -284,7 +288,22 @@ function Get-SupportDetails {
         } while ([string]::IsNullOrWhiteSpace($script:SupportProblem))
     }
 
-    Write-ColoredOutput "By continuing, you authorize NI SP to process the (unencrypted) log bundle to generate an AI analysis." "Green"
+    # Ask before handing the bundle to Deep NI SP. Non-interactive runs have no
+    # one to ask, so the analysis stays on unless --without-analysis was given.
+    if (-not $script:SkipAnalysis -and -not $script:NonInteractive) {
+        do {
+            Write-ColoredOutput "[QUESTION] Send the logs to Deep NI SP for an automatic analysis? You get a private report link. (Y/n)" "Yellow"
+            $answer = (Read-Host).Trim()
+        } while ($answer -notin @("", "Y", "y", "Yes", "yes", "N", "n", "No", "no"))
+        if ($answer -match "^(N|n|No|no)$") { $script:SkipAnalysis = $true }
+    }
+
+    if ($script:SkipAnalysis) {
+        Write-ColoredOutput "By continuing, you authorize NI SP to store the (unencrypted) log bundle for support. It will be uploaded without an automatic analysis." "Green"
+    }
+    else {
+        Write-ColoredOutput "By continuing, you authorize NI SP to process the (unencrypted) log bundle to generate an automatic analysis." "Green"
+    }
 }
 
 # Upload a bundle to the NI SP upload service (tus protocol) and request an AI
@@ -306,13 +325,18 @@ function Invoke-SendToSupport {
         $fileNameB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($fileName))
         # Tag the upload with the product so the upload service does NOT post its own
         # Slack card — Deep NI SP announces this bundle when the analysis finishes.
-        $productB64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:ProductKey))
+        # Without the analysis the upload stays untagged, so NI SP Support still gets
+        # the upload service's card.
+        $productMeta = ""
+        if (-not $script:SkipAnalysis) {
+            $productMeta = ",product " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:ProductKey))
+        }
         $fileSizeMB  = [math]::Round($fileBytes.Length / 1MB, 2)
 
         # E-mail, problem and consent go into the upload's .info sidecar so the NI SP
         # upload admin shows who sent the bundle. The problem is capped at 300 chars
         # (never splitting a surrogate pair) to keep the header small.
-        $metadata = "filename $fileNameB64,product $productB64,consent " +
+        $metadata = "filename $fileNameB64$productMeta,consent " +
             [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('1')) +
             ",email " + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:SupportEmail))
         if (-not [string]::IsNullOrWhiteSpace($script:SupportProblem)) {
@@ -346,8 +370,17 @@ function Invoke-SendToSupport {
         if ([string]::IsNullOrWhiteSpace($signResp.url)) { throw "no download link was returned." }
         $downloadUrl = "$script:UploadServiceBase$($signResp.url)"
 
-        # 4) request AI analysis — Deep NI SP queues the job and returns a report link.
-        Write-ColoredOutput "Requesting AI log analysis..." "Green"
+        if ($script:SkipAnalysis) {
+            Write-Host "#########################################################################"
+            Write-ColoredOutput "Your logs were uploaded to NI SP and NI SP Support was notified." "Green"
+            Write-ColoredOutput "Download link (expires in 7 days):" "Green"
+            Write-ColoredOutput $downloadUrl "Yellow"
+            Write-Host "#########################################################################"
+            return
+        }
+
+        # 4) request the analysis — Deep NI SP queues the job and returns a report link.
+        Write-ColoredOutput "Requesting automatic log analysis..." "Green"
         $form = @{
             product             = $script:ProductKey
             problem_description = $script:SupportProblem
@@ -361,7 +394,7 @@ function Invoke-SendToSupport {
         $reportUrl = "$script:DeepAiBase$($analysisResp.result_url)"
 
         Write-Host "#########################################################################"
-        Write-ColoredOutput "Your logs were sent to NI SP for AI analysis." "Green"
+        Write-ColoredOutput "Your logs were sent to NI SP for automatic analysis." "Green"
         Write-ColoredOutput "Your report will be ready within ~30 minutes at:" "Green"
         Write-ColoredOutput $reportUrl "Yellow"
         Write-ColoredOutput "Bookmark this private link - it is how you and NI SP Support read the result." "Green"
@@ -1214,6 +1247,7 @@ for ($i = 0; $i -lt $args.Count; $i++) {
         '^--email=.*$'            { $script:SupportEmail = $arg.Substring('--email='.Length); break }
         '^--problem$'             { $i++; $script:SupportProblem = [string]$args[$i]; break }
         '^--problem=.*$'          { $script:SupportProblem = $arg.Substring('--problem='.Length); break }
+        '^--without-analysis$'    { $script:SkipAnalysis = $true; break }
         '^(--help|-h|-\?|/\?)$'   { $ShowHelp = $true; break }
         '^(--force|-Force)$'      { break }  # accepted for backward compatibility (no-op)
         default {

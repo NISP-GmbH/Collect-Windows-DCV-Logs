@@ -2,7 +2,7 @@
 
 This script was created to help you collect all relevant logs to troubleshoot any DCV issue.
 
-After collect the data, you will be asked if you want to securely send the file to NI-SP Cloud or if you want to send it manually.
+After collecting the data, the script uploads it to NI SP over HTTPS and asks whether to also send it to Deep NI SP for an automatic analysis. If you agree, it prints a private report link (ready within ~30 minutes); if not, the bundle is only uploaded and NI SP Support is notified.
 
 # How to execute:
 
@@ -25,7 +25,8 @@ The script can also be run unattended using the following options:
 | `--collect-logs` | Only collect logs (no interactive menu / prompts). |
 | `--report-only` | _Not available — this script has no separate report mode._ |
 | `--proxy <url>` | Use a proxy for uploading (e.g. `http://proxy:8080`, `socks5://proxy:1080`). |
-| `--name <text>` | Your name or company, sent with the AI analysis request. |
+| `--without-analysis` | Upload without asking for or requesting the automatic analysis. NI SP Support is notified of the upload. |
+| `--name <text>` | Your name or company, sent with the upload. |
 | `--email <addr>` | Your e-mail, so NI SP Support can reach you. |
 | `--problem <text>` | Short description of the problem you are seeing. |
 | `--message <text>` | Deprecated alias of `--problem`. |
@@ -35,8 +36,10 @@ The script can also be run unattended using the following options:
 `--name`, `--email` and `--problem` are mandatory unless `--without-upload` is
 used. Interactively they are asked for when missing; in non-interactive mode
 (`--collect-logs`) a missing or invalid value stops the script (exit code 26).
-They go to Deep NI SP with the analysis request and are also stored with the
-upload on NI SP's upload service, so NI SP Support can see who sent the bundle.
+They are stored with the upload on NI SP's upload service, so NI SP Support can
+see who sent the bundle, and go to Deep NI SP with the analysis request. In
+non-interactive mode the automatic analysis is requested unless
+`--without-analysis` is given.
 Group Policy (GPO) results are **not** collected unattended, since they can be sensitive.
 
 ### Examples
